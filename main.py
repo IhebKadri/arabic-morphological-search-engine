@@ -2,6 +2,7 @@
 #  @brief Point d'entrée de l'application Flet pour le moteur morphologique.
 #  Gère l'interface graphique, les événements utilisateur et le rendu dynamique.
 
+import os
 import flet as ft
 import flet.canvas as cv
 import time
@@ -138,6 +139,8 @@ def main(page: ft.Page):
             ft.dropdown.Option(k, f"{k} ({v['type']})") for k, v in engine.get_all_patterns()
         ]
 
+    vocalization_toggle = ft.Switch(label="تشكيل الكلمات", value=True, label_position=ft.LabelPosition.LEFT)
+
     def on_gen(e):
         """@brief Gère la génération d'un mot unique à partir d'une racine et d'un schème."""
         if not gen_root.value:
@@ -145,7 +148,7 @@ def main(page: ft.Page):
         if not gen_pat.value:
             msg("⚠️", "اختر وزناً", "", C["warn"]); return
         t0 = time.perf_counter()
-        res = engine.generate(gen_root.value, gen_pat.value)
+        res = engine.generate(gen_root.value, gen_pat.value, vocalized=vocalization_toggle.value)
         dt = (time.perf_counter() - t0) * 1000
         if "خطأ" in res:
             msg("❌", res, f"({dt:.0f} ms)", C["err"])
@@ -165,7 +168,7 @@ def main(page: ft.Page):
         if not gen_root.value:
             msg("⚠️", "أدخل جذراً", "", C["warn"]); return
         t0 = time.perf_counter()
-        results = engine.generate_all(gen_root.value)
+        results = engine.generate_all(gen_root.value, vocalized=vocalization_toggle.value)
         gen_results.controls = [
             ft.Container(
                 content=ft.Row([
@@ -197,7 +200,10 @@ def main(page: ft.Page):
         gen_results.update()
 
     gen_card = card(ft.Column([
-        ft.Text("مولد الكلمات", size=20, weight="bold", color=C["t1"]),
+        ft.Row([
+            ft.Text("مولد الكلمات", size=20, weight="bold", color=C["t1"], expand=True),
+            vocalization_toggle
+        ]),
         ft.Text("أدخل جذراً واختر وزناً أو ولّد جميع الاشتقاقات", size=13, color=C["t2"]),
         ft.Divider(color=C["border"]),
         gen_root, gen_pat,
@@ -245,6 +251,14 @@ def main(page: ft.Page):
     # ═════════════════════════════════════════════════════════
     # TAB 3 — الجذور  (incremental updates)
     # ═════════════════════════════════════════════════════════
+
+    def _is_valid_root_token(token: str) -> bool:
+        token = token.strip()
+        if len(token) != 3:
+            return False
+        # N'accepte que des lettres arabes de base (pas de chiffres ou de ponctuation)
+        return all("\u0621" <= c <= "\u064A" for c in token)
+
     roots_inp = inp("جذر جديد", "3 أحرف")
     roots_lv = ft.ListView(expand=True, spacing=4, item_extent=ROW_H)
 
@@ -257,22 +271,56 @@ def main(page: ft.Page):
         if not dw:
             msg("⚠️", "لا توجد مشتقات", "", C["warn"]); return
         
-        lv = ft.ListView(expand=True, spacing=8)
-        for w in dw:
-            freq = freqs.get(w, 0)
-            lv.controls.append(
-                ft.Container(
-                    content=ft.Row([
-                        ft.Container(
-                            content=ft.Text(w, size=16, weight="bold", color=C["accent2"], selectable=True),
-                            bgcolor=C["badge"], border_radius=6,
-                            padding=ft.padding.symmetric(horizontal=10, vertical=2),
-                        ),
-                        ft.Text(f"التكرار: {freq}", size=13, color=C["t2"]),
-                    ], spacing=10, rtl=True),
-                    padding=ft.padding.only(bottom=8),
-                    border=ft.border.only(bottom=ft.BorderSide(1, C["border"])),
+        # Sort by frequency descending for better experience
+        sorted_dw = sorted(dw, key=lambda w: freqs.get(w, 0), reverse=True)
+        
+        load_count = [0]
+        PAGE_SIZE = 15
+
+        lv = ft.ListView(expand=True, spacing=8, item_extent=50)
+        
+        def add_batch(e=None):
+            start = load_count[0]
+            end = start + PAGE_SIZE
+            batch = sorted_dw[start:end]
+            for w in batch:
+                freq = freqs.get(w, 0)
+                lv.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Container(
+                                content=ft.Text(w, size=16, weight="bold", color=C["accent2"], selectable=True),
+                                bgcolor=C["badge"], border_radius=6,
+                                padding=ft.padding.symmetric(horizontal=10, vertical=2),
+                            ),
+                            ft.Text(f"التكرار: {freq}", size=13, color=C["t2"]),
+                        ], spacing=10, rtl=True),
+                        padding=ft.padding.only(bottom=8),
+                        border=ft.border.only(bottom=ft.BorderSide(1, C["border"])),
+                    )
                 )
+            load_count[0] = end
+            if load_count[0] >= len(sorted_dw):
+                load_more_btn.visible = False
+            if e:
+                lv.update()
+                load_more_btn.update()
+
+        load_more_btn = ft.TextButton("تحميل المزيد...", on_click=add_batch, visible=len(sorted_dw) > PAGE_SIZE)
+        add_batch() # Initial load
+
+        max_f = max(freqs.values()) if freqs else 1
+        min_f = min(freqs.values()) if freqs else 1
+        
+        # Limit word cloud to top 50 for performance
+        cloud_controls = []
+        for w in sorted_dw[:50]:
+            freq = freqs.get(w, 0)
+            display_freq = max(1, freq)
+            font_size = 14 + ((display_freq - min_f) / max(1, max_f - min_f)) * 24 if max_f > min_f else 18
+            color = C["accent"] if display_freq > min_f else C["t2"]
+            cloud_controls.append(
+                ft.Text(w, size=font_size, color=color, weight="bold", tooltip=f"التكرار: {freq}")
             )
             
         def close_dlg(e):
@@ -283,9 +331,45 @@ def main(page: ft.Page):
                 dlg.open = False
                 page.update()
 
+        tabs = ft.Tabs(
+            selected_index=0,
+            length=2,
+            expand=True,
+            content=ft.Column(expand=True, controls=[
+                ft.Container(
+                    content=ft.TabBar(
+                        tabs=[
+                            ft.Tab(label="سحابة الكلمات", icon=ft.Icons.CLOUD),
+                            ft.Tab(label="قائمة", icon=ft.Icons.LIST),
+                        ],
+                        indicator_color=C["accent"],
+                        label_color=C["accent2"],
+                        unselected_label_color=C["t2"],
+                        divider_color=C["border"],
+                    ),
+                    alignment=ft.Alignment(0, 0),
+                ),
+                ft.TabBarView(expand=True, controls=[
+                    ft.Container(
+                        content=ft.Column([
+                            ft.Row(cloud_controls, wrap=True, alignment=ft.MainAxisAlignment.CENTER, spacing=15, run_spacing=15)
+                        ], scroll=ft.ScrollMode.AUTO),
+                        padding=20, rtl=True
+                    ),
+                    ft.Container(
+                        content=ft.Column([
+                            lv,
+                            ft.Container(load_more_btn, alignment=ft.Alignment(0, 0), padding=10)
+                        ], expand=True),
+                        padding=10, rtl=True
+                    ),
+                ]),
+            ]),
+        )
+
         dlg = ft.AlertDialog(
             title=ft.Text(f"المشتقات المؤكدة للجذر: {key}", color=C["accent"], text_align=ft.TextAlign.RIGHT),
-            content=ft.Container(lv, width=300, height=400, rtl=True),
+            content=ft.Container(tabs, width=400, height=450, rtl=True),
             actions=[ft.TextButton("إغلاق", on_click=close_dlg)],
             bgcolor=C["card"],
             open=True,
@@ -388,8 +472,8 @@ def main(page: ft.Page):
 
     def on_add_root(e):
         r = roots_inp.value.strip() if roots_inp.value else ""
-        if len(r) != 3:
-            msg("⚠️", "الجذر يجب أن يكون 3 أحرف", "", C["warn"]); return
+        if not _is_valid_root_token(r):
+            msg("⚠️", "الجذر يجب أن يكون 3 أحرف عربية", "", C["warn"]); return
         t0 = time.perf_counter()
         if engine.add_root(r):
             roots_inp.value = ""
@@ -405,13 +489,82 @@ def main(page: ft.Page):
             dt = (time.perf_counter() - t0) * 1000
             msg("⚠️", f"'{r}' موجود", f"{dt:.0f} ms", C["warn"])
 
+    def on_roots_file_picked(e):
+        if not e.files:
+            return
+        file_path = e.files[0].path
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            tokens = content.split()
+            valid_roots = [t for t in tokens if _is_valid_root_token(t)]
+
+            added_count = 0
+            t0 = time.perf_counter()
+            for r in valid_roots:
+                if engine.add_root(r):
+                    idx = bisect.bisect_left(root_keys, r)
+                    root_keys.insert(idx, r)
+                    roots_lv.controls.insert(idx, _make_root_row(r))
+                    added_count += 1
+
+            dt = (time.perf_counter() - t0) * 1000
+            if added_count > 0:
+                msg("✅", f"تم استيراد {added_count} جذر", f"{dt:.0f} ms", C["ok"])
+                out_bar.update()
+                roots_lv.update()
+            else:
+                msg("⚠️", "لم يتم العثور على جذور صالحة جديدة", "", C["warn"])
+        except Exception as ex:
+            msg("❌", "خطأ في قراءة الملف", str(ex), C["err"])
+
+    roots_import_inp = inp("مسار ملف الجذور", "مثال: roots.txt")
+    
+    def on_import_from_path(e):
+        path = roots_import_inp.value.strip()
+        if not path:
+            msg("⚠️", "أدخل مسار الملف", "", C["warn"])
+            return
+        
+        # Fake an event object with files structure to reuse logic
+        class FakeFile:
+            def __init__(self, p): self.path = p
+        class FakeEvent:
+            def __init__(self, f): self.files = [f]
+            
+        on_roots_file_picked(FakeEvent(FakeFile(path)))
+        roots_import_inp.value = ""
+        roots_import_inp.update()
+
+    def on_export_data(e):
+        data = engine.export_data()
+        
+        # Access the module-level constant DATA_DIR from morphology.py
+        import logic.morphology as morph
+        export_path = os.path.join(morph.DATA_DIR, "export_full_database.txt")
+        
+        try:
+            with open(export_path, "w", encoding="utf-8") as f:
+                f.write(data)
+            msg("✅", f"تم تصدير البيانات إلى: export_full_database.txt", "", C["ok"])
+        except Exception as ex:
+            msg("❌", "خطأ في تصدير البيانات", str(ex), C["err"])
+
     roots_card = card(ft.Column([
         ft.Row([
             ft.Text("إدارة الجذور", size=20, weight="bold", color=C["t1"], expand=True),
+            btn("تصدير 📤", on_export_data, primary=False),
             btn("حذف كل المشتقات 🧹", on_del_all_derivatives, primary=False)
         ]),
         ft.Divider(color=C["border"]),
-        ft.Row([roots_inp, btn("إضافة", on_add_root)], spacing=8),
+        ft.Row([
+            roots_inp, 
+            btn("إضافة", on_add_root),
+        ], spacing=8),
+        ft.Row([
+            roots_import_inp,
+            btn("استيراد", on_import_from_path, primary=False)
+        ], spacing=8),
         ft.Divider(color=C["border"]),
         roots_lv,
     ], spacing=8, expand=True), expand=True)
@@ -688,10 +841,60 @@ def main(page: ft.Page):
     ], spacing=6, expand=True), expand=True)
 
     # ═════════════════════════════════════════════════════════
+    # TAB 7 — التحليل العكسي (Stemmer)
+    # ═════════════════════════════════════════════════════════
+    rev_inp = inp("الكلمة للتحليل", "مثال: مكَاتيب")
+    rev_results = ft.ListView(expand=True, spacing=4)
+
+    def on_reverse_analysis(e):
+        w = rev_inp.value.strip() if rev_inp.value else ""
+        if not w:
+            msg("⚠️", "أدخل كلمة للتحليل", "", C["warn"]); return
+        
+        t0 = time.perf_counter()
+        matches = engine.reverse_search(w)
+        dt = (time.perf_counter() - t0) * 1000
+        
+        rev_results.controls = []
+        if not matches:
+            rev_results.controls.append(ft.Text("لم يتم العثور على نتائج", color=C["err"]))
+        else:
+            for m in matches:
+                rev_results.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Container(
+                                content=ft.Text(m["root"], size=16, weight="bold", color=C["accent2"]),
+                                bgcolor=C["badge"], border_radius=6,
+                                padding=ft.padding.symmetric(horizontal=10, vertical=2),
+                            ),
+                            ft.Text(f"الوزن: {m['pattern']}", size=13, weight="bold", color=C["t1"]),
+                            ft.Text(f"({m['type']})", size=12, color=C["t2"]),
+                            ft.Container(expand=True),
+                            ft.Text(m["vocalized"], size=14, color=C["accent"]),
+                        ], spacing=10),
+                        padding=ft.padding.symmetric(horizontal=15, vertical=10),
+                        border=ft.border.only(bottom=ft.BorderSide(1, C["border"])),
+                    )
+                )
+        
+        msg("✅", f"تم تحليل '{w}' في {dt:.0f} ms", f"النتائج: {len(matches)}", C["ok"])
+        rev_results.update()
+
+    rev_card = card(ft.Column([
+        ft.Text("التحليل العكسي (Stemmer)", size=20, weight="bold", color=C["t1"]),
+        ft.Text("ابحث عن الجذر والوزن الأصلي لأي كلمة", size=13, color=C["t2"]),
+        ft.Divider(color=C["border"]),
+        ft.Row([rev_inp, btn("تحليل", on_reverse_analysis)]),
+        ft.Divider(color=C["border"]),
+        rev_results,
+    ], spacing=8, expand=True), expand=True)
+
+    # ═════════════════════════════════════════════════════════
     # TABS
     # ═════════════════════════════════════════════════════════
     body = ft.Tabs(
-        selected_index=0, length=6, expand=True,
+        selected_index=0, length=7, expand=True,
         content=ft.Column(expand=True, controls=[
             ft.Container(
                 content=ft.TabBar(
@@ -702,6 +905,7 @@ def main(page: ft.Page):
                         ft.Tab(label="الأوزان", icon=ft.Icons.VIEW_LIST),
                         ft.Tab(label="شجرة AVL", icon=ft.Icons.ACCOUNT_TREE),
                         ft.Tab(label="جدول Hash", icon=ft.Icons.GRID_VIEW),
+                        ft.Tab(label="المحلل", icon=ft.Icons.SEARCH),
                     ],
                     indicator_color=C["accent"],
                     label_color=C["accent2"],
@@ -717,6 +921,7 @@ def main(page: ft.Page):
                 ft.Container(content=pats_card, padding=10, expand=True),
                 ft.Container(content=avl_card, padding=10, expand=True),
                 ft.Container(content=hash_card, padding=10, expand=True),
+                ft.Container(content=rev_card, padding=10, expand=True),
             ]),
         ]),
     )
@@ -770,3 +975,4 @@ def main(page: ft.Page):
 
 if __name__ == "__main__":
     ft.run(main)
+            

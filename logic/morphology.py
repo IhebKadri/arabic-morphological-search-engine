@@ -186,7 +186,16 @@ class MorphologicalEngine:
 
     # ─── Logic ───────────────────────────────────────────────
 
-    def generate(self, root: str, pattern_key: str) -> str:
+    def _strip_tashkeel(self, text: str) -> str:
+        """@brief Supprime les diacritiques (tashkeel) d'un texte arabe."""
+        tashkeel = ["\u064B", "\u064C", "\u064D", "\u064E", "\u064F", "\u0650", "\u0651", "\u0652"]
+        res = ""
+        for c in text:
+            if c not in tashkeel:
+                res += c
+        return res
+
+    def generate(self, root: str, pattern_key: str, vocalized: bool = True) -> str:
         """
         @brief Génère un mot dérivé en insérant les consonnes de la racine dans un schème.
         
@@ -195,6 +204,7 @@ class MorphologicalEngine:
         
         @param root Le radical (doit faire 3 caractères).
         @param pattern_key Le schème à appliquer.
+        @param vocalized Si False, retourne le mot sans diacritiques.
         @return Le mot généré ou un message d'erreur.
         """
         if len(root) != 3:
@@ -225,17 +235,19 @@ class MorphologicalEngine:
             else: result.append(char)
             i += 1
 
-        return "".join(result)
+        generated = "".join(result)
+        return generated if vocalized else self._strip_tashkeel(generated)
 
-    def generate_all(self, root: str):
+    def generate_all(self, root: str, vocalized: bool = True):
         """
         @brief Génère tous les mots possibles pour une racine donnée en traversant tous les schèmes.
         @param root Le radical de 3 lettres.
+        @param vocalized Si False, retourne les mots sans diacritiques.
         @return Liste de tuples (mot, schème, type).
         """
         results = []
         for p_key, p_val in self.get_all_patterns():
-            word = self.generate(root, p_key)
+            word = self.generate(root, p_key, vocalized=vocalized)
             if "خطأ" not in word:
                 results.append((word, p_key, p_val["type"]))
         return results
@@ -301,3 +313,53 @@ class MorphologicalEngine:
         pats = self.patterns_table.get_all()
         pats.sort(key=lambda x: x[0])
         return pats
+
+    def reverse_search(self, word: str) -> list:
+        """
+        @brief Analyse un mot pour trouver ses racines et schèmes possibles.
+        @param word Le mot à analyser (avec ou sans voyelles).
+        @return Liste de dictionnaires [{"root": "...", "pattern": "...", "type": "..."}]
+        """
+        stripped_word = self._strip_tashkeel(word)
+        matches = []
+        
+        all_roots = [n.key for n in self.roots_tree.inorder_traversal()]
+        all_pats = self.get_all_patterns()
+        
+        for r in all_roots:
+            for p_key, p_val in all_pats:
+                # On compare sans voyelles pour plus de flexibilité
+                gen_vocalized = self.generate(r, p_key)
+                gen_stripped = self._strip_tashkeel(gen_vocalized)
+                
+                if gen_stripped == stripped_word:
+                    matches.append({
+                        "root": r,
+                        "pattern": p_key,
+                        "type": p_val["type"],
+                        "vocalized": gen_vocalized
+                    })
+        return matches
+
+    def export_data(self) -> str:
+        """
+        @brief Exporte toute la base de données (racines, dérivés, schèmes) en format texte lisible.
+        @return Chaîne de caractères formatée.
+        """
+        out = "=== ARABIC MORPHOLOGICAL ENGINE EXPORT ===\n\n"
+        
+        out += "--- PATTERNS ---\n"
+        for k, v in self.get_all_patterns():
+            out += f"{k} | {v['type']}\n"
+        
+        out += "\n--- ROOTS & DERIVATIVES ---\n"
+        for n in self.roots_tree.inorder_traversal():
+            out += f"Root: {n.key}\n"
+            dw = n.value.derived_words
+            if dw:
+                out += "  Derivatives: " + ", ".join(dw) + "\n"
+            else:
+                out += "  No verified derivatives.\n"
+            out += "\n"
+            
+        return out
